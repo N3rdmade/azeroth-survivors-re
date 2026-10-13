@@ -85,7 +85,6 @@ fn run_host(addr: &str) -> io::Result<()> {
                     vacant
                 };
                 if let Some(id) = id {
-                    socket.write_all(format!("WELCOME {id}\n").as_bytes())?;
                     println!("Player {id} connected from {remote}");
                     let lobby = Arc::clone(&shared);
                     thread::spawn(move || {
