@@ -1,0 +1,33 @@
+name: Windows Co-op Preview
+on:
+  push:
+    branches: [multiplayer]
+    paths:
+      - 'crates/survivors-coop/**'
+      - 'coop/windows/**'
+      - '.github/workflows/coop-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-coop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test co-op
+        run: cargo test -p survivors-coop
+      - name: Build Windows exe
+        run: cargo build --release -p survivors-coop
+      - name: Assemble preview package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path coop-preview | Out-Null
+          Copy-Item target/release/survivors-coop.exe coop-preview/
+          Copy-Item coop/windows/*.bat coop-preview/
+          Copy-Item coop/windows/README.txt coop-preview/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AzerothSurvivors-Coop-Lobby-Windows
+          path: coop-preview/
+          retention-days: 30
