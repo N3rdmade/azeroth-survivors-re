@@ -1,31 +1,35 @@
-# Native LAN co-op — phase 1
+# Windows co-op development
 
-This branch preserves the original game and starts with a separate **native Windows-compatible networking harness**. It is **not yet playable multiplayer**, and does not patch the uploaded original EXE.
+## Phase 1: Downloadable lobby preview
 
-## Test the transport
+The separate `survivors-coop.exe` is a Windows LAN lobby test harness. **It does not run
+the actual game yet.** This first step tests connectivity, four player slots, per-player
+ready state, and a host-only START message.
 
-On the host PC:
+Every push to the `multiplayer` branch that changes co-op code triggers
+[Windows Co-op Preview](../.github/workflows/coop-windows.yml). Download its
+`AzerothSurvivors-Coop-Lobby-Windows` artifact from a successful workflow run, extract
+it, and double-click `Launch-Lobby.bat`.
+
+Host selects 1. Friends select 2 and enter the host's LAN IP address.
+Everyone types `ready` and hits Enter. Host types `start` after all players are
+ready. Starting currently displays a confirmation, not the game.
+
+The host occupies slot 1; three guests can join. TCP 45454; LAN/private networks only.
+
+## Next stages
+
+- Add actual Windows game UI for Host/Join, lobby slots, ready indicators and Start.
+- Connect the native host transport to the Bevy game's entities and local player.
+- Separate match and per-player run state; synchronize enemy AI, combat, XP and level-up.
+- Ship a versioned Windows release with optional update-check prompt (never silently
+  overwriting, and use verifiable GitHub releases).
+
+## Build locally
 
 ```sh
-cargo run --release -p survivors-coop -- host 0.0.0.0:45454
+cargo test -p survivors-coop
+cargo build --release -p survivors-coop
 ```
 
-On each client PC (up to four connections, including the host if the host also joins):
-
-```sh
-cargo run --release -p survivors-coop -- join 192.168.1.100:45454
-```
-
-Replace the sample address with the host PC's LAN address. Type `MOVE 12 8` on the client terminal to broadcast coordinates. The server periodically sends `STATE` snapshots containing all connected player positions. The host process is currently a dedicated headless process; a future phase will put Host/Join into the game menu and run the server alongside the host's game.
-
-## Next integration steps
-
-1. Add stable player IDs and a `LocalHero` marker while keeping rendering focused on a single local character.
-2. Split `Run` into match-wide and per-player state; do not make all heroes share HP, class, abilities, or XP.
-3. Attach the transport to Bevy with channels, apply client input on the authoritative host, and replicate player positions.
-4. Replace `Hero::single()` assumptions in enemy AI, pickup and cast logic; synchronize combat and leveling.
-5. Add the in-game lobby, connect/disconnect recovery, and four-player Windows smoke testing.
-
-## Limits
-
-Protocol v1 is plain-text TCP, designed only for trusted LAN prototype use. It has no authentication, rate limits or internet-safe threat model. It carries test coordinates, **not actual player movement**. Internet deployment should use a validated binary protocol with input rate limits and appropriate authentication.
+The source is cross-platform Rust, while packaging and testing prioritize Windows.
