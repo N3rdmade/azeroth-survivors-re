@@ -1,0 +1,10 @@
+[package]
+name = "survivors-coop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native LAN co-op transport prototype for Azeroth Survivors"
+
+[[bin]]
+name = "survivors-coop"
+path = "src/main.rs"
