@@ -1,8 +1,6 @@
-//! Windows-first LAN networking prototype.
-//! Protocol v1 is deliberately independent from the WoW realm protocol.
-//! Run: cargo run --release -p survivors-coop -- host 0.0.0.0:45454
-//!      cargo run --release -p survivors-coop -- join 127.0.0.1:45454
-//! This is a transport test harness, not yet hooked into the game simulation.
+//! Windows-first LAN co-op lobby prototype. This is not yet connected to the game simulation.
+//! Launch host: survivors-coop host 0.0.0.0:45454
+//! Join:        survivors-coop join 192.168.1.10:45454
 use std::{
     collections::BTreeMap,
     env,
@@ -10,142 +8,158 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const MAX_PLAYERS: usize = 4;
-const MAX_LINE: usize = 256;
-const TICK: Duration = Duration::from_millis(50);
+const PORT: u16 = 45454;
 
-#[derive(Clone, Copy, Debug)]
-struct Position { x: f32, z: f32 }
+#[derive(Clone, Copy)]
+struct Player { ready: bool }
 
 #[derive(Default)]
 struct Lobby {
-    players: BTreeMap<u8, Position>,
+    players: BTreeMap<u8, Player>,
     peers: BTreeMap<u8, TcpStream>,
+    started: bool,
 }
 
-fn parse_move(line: &str) -> Option<Position> {
-    let mut parts = line.split_whitespace();
-    if parts.next()? != "MOVE" { return None; }
-    let x: f32 = parts.next()?.parse().ok()?;
-    let z: f32 = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || !x.is_finite() || !z.is_finite() { return None; }
-    // Reject implausible coordinates before they enter the shared state.
-    if x.abs() > 100_000.0 || z.abs() > 100_000.0 { return None; }
-    Some(Position { x, z })
-}
-
-fn snapshot(players: &BTreeMap<u8, Position>) -> String {
-    let mut out = String::from("STATE");
-    for (id, p) in players {
-        out.push_str(&format!(" {id}:{:.3}:{:.3}", p.x, p.z));
+fn lobby_snapshot(lobby: &Lobby) -> String {
+    let mut s = String::from("LOBBY");
+    for (id,p) in &lobby.players {
+        s.push_str(&format!(" {id}:{}", if p.ready { "READY" } else { "WAITING" }));
     }
-    out.push('\n');
-    out
+    s.push('\n');
+    s
 }
 
-fn run_host(addr: &str) -> io::Result<()> {
+fn host(addr: &str) -> io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let shared = Arc::new(Mutex::new(Lobby::default()));
-    println!("Azeroth Survivors LAN lobby listening on {addr}; max {MAX_PLAYERS} players");
-    let broadcast = Arc::clone(&shared);
+    println!("Co-op lobby hosted at {addr}. Up to {MAX_PLAYERS} clients (host joins as player 1).");
+    let broadcast = shared.clone();
     thread::spawn(move || loop {
-        thread::sleep(TICK);
+        thread::sleep(Duration::from_millis(250));
         let mut lobby = broadcast.lock().expect("lobby lock");
-        let msg = snapshot(&lobby.players);
+        let snapshot = lobby_snapshot(&lobby);
         let mut disconnected = Vec::new();
         for (&id, peer) in &mut lobby.peers {
-            if peer.write_all(msg.as_bytes()).is_err() {
+            if peer.write_all(snapshot.as_bytes()).is_err() {
                 disconnected.push(id);
             }
         }
         for id in disconnected {
-            lobby.peers.remove(&id);
             lobby.players.remove(&id);
+            lobby.peers.remove(&id);
         }
     });
     loop {
         match listener.accept() {
-            Ok((mut socket, remote)) => {
+            Ok((mut socket, address)) => {
                 socket.set_nodelay(true)?;
-                socket.set_write_timeout(Some(Duration::from_millis(250)))?;
+                socket.set_write_timeout(Some(Duration::from_secs(1)))?;
                 let id = {
                     let mut lobby = shared.lock().expect("lobby lock");
-                    let vacant = (1..=MAX_PLAYERS as u8)
-                        .find(|id| !lobby.players.contains_key(id));
+                    let vacant = if lobby.started { None } else {
+                        (1..=MAX_PLAYERS as u8).find(|id| !lobby.players.contains_key(id))
+                    };
                     if let Some(id) = vacant {
-                        // Send the handshake before exposing the connection to the snapshot loop.
+                        // Welcome must precede snapshots.
                         socket.write_all(format!("WELCOME {id}\n").as_bytes())?;
-                        lobby.players.insert(id, Position { x: 0.0, z: 0.0 });
+                        lobby.players.insert(id, Player { ready: false });
                         lobby.peers.insert(id, socket.try_clone()?);
                     }
                     vacant
                 };
                 if let Some(id) = id {
-                    println!("Player {id} connected from {remote}");
-                    let lobby = Arc::clone(&shared);
+                    println!("Player {id} connected from {address}");
+                    let lobby = shared.clone();
                     thread::spawn(move || {
-                        let _ = handle_peer(socket, id, &lobby);
-                        let mut state = lobby.lock().expect("lobby lock");
-                        state.players.remove(&id);
-                        state.peers.remove(&id);
-                        println!("Player {id} disconnected");
+                        if let Err(e) = handle_player(socket, id, &lobby) {
+                            eprintln!("Player {id}: {e}");
+                        }
+                        let mut lobby = lobby.lock().expect("lobby lock");
+                        lobby.players.remove(&id);
+                        lobby.peers.remove(&id);
                     });
                 } else {
-                    let _ = socket.write_all(b"FULL\n");
+                    let _ = socket.write_all(b"FULL_OR_STARTED\n");
                 }
             }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock =>
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock =>
                 thread::sleep(Duration::from_millis(20)),
-            Err(err) => return Err(err),
+            Err(e) => return Err(e),
         }
     }
 }
 
-fn handle_peer(socket: TcpStream, id: u8, shared: &Arc<Mutex<Lobby>>) -> io::Result<()> {
-    let reader = BufReader::new(socket);
-    for line in reader.lines() {
-        let line = line?;
-        if line.len() > MAX_LINE { break; }
-        if let Some(p) = parse_move(&line) {
-            if let Some(current) = shared.lock().expect("lobby lock").players.get_mut(&id) {
-                *current = p;
+fn handle_player(socket: TcpStream, id: u8, shared: &Arc<Mutex<Lobby>>) -> io::Result<()> {
+    let mut reader = BufReader::new(socket);
+    loop {
+        let mut line = String::new();
+        let count = reader.read_line(&mut line)?;
+        if count == 0 || count > 128 { return Ok(()); }
+        let cmd = line.trim().to_ascii_uppercase();
+        let mut lobby = shared.lock().expect("lobby lock");
+        match cmd.as_str() {
+            "READY" | "UNREADY" if !lobby.started => {
+                if let Some(p) = lobby.players.get_mut(&id) { p.ready = cmd == "READY"; }
             }
+            "START" if id == 1 && !lobby.started => {
+                if !lobby.players.is_empty() && lobby.players.values().all(|p| p.ready) {
+                    lobby.started = true;
+                    println!("All players ready: lobby started");
+                    for peer in lobby.peers.values_mut() { let _ = peer.write_all(b"STARTED\n"); }
+                } else if let Some(peer) = lobby.peers.get_mut(&id) {
+                    let _ = peer.write_all(b"NOT_READY\n");
+                }
+            }
+            "START" if id != 1 => {
+                if let Some(peer) = lobby.peers.get_mut(&id) {
+                    let _ = peer.write_all(b"HOST_ONLY\n");
+                }
+            }
+            _ => {}
         }
     }
-    Ok(())
 }
 
-fn run_join(addr: &str) -> io::Result<()> {
+fn join(addr: &str) -> io::Result<()> {
     let mut socket = TcpStream::connect(addr)?;
     socket.set_nodelay(true)?;
     let mut reader = BufReader::new(socket.try_clone()?);
-    let mut welcome = String::new();
-    reader.read_line(&mut welcome)?;
-    print!("{welcome}");
-    if !welcome.starts_with("WELCOME ") {
-        return Err(io::Error::other("lobby rejected connection"));
+    let mut hello = String::new();
+    reader.read_line(&mut hello)?;
+    if !hello.starts_with("WELCOME ") {
+        println!("{}", hello.trim());
+        return Err(io::Error::other("Lobby unavailable"));
     }
+    let host = hello.trim() == "WELCOME 1";
+    println!("Connected as {}.", if host { "HOST (Player 1)" } else { "guest" });
+    println!("Commands: ready, unready{} , quit", if host { ", start" } else { "" });
     thread::spawn(move || {
+        let mut last = String::new();
         for line in reader.lines() {
             match line {
-                Ok(line) if line.starts_with("STATE") => println!("{line}"),
-                _ => break,
+                Ok(line) if line.starts_with("LOBBY") => {
+                    if line != last { println!("{line}"); last = line; }
+                }
+                Ok(line) if line == "STARTED" => println!("All ready! STARTED (game integration comes next)."),
+                Ok(line) => println!("{line}"),
+                Err(_) => break,
             }
         }
+        println!("Connection closed.");
     });
-    println!("Type coordinates as: MOVE 10 20 (Ctrl+C to quit)");
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if parse_move(&line).is_some() {
-            socket.write_all(line.as_bytes())?;
-            socket.write_all(b"\n")?;
+    for line in io::stdin().lock().lines() {
+        let input = line?;
+        let cmd = input.trim().to_ascii_uppercase();
+        if cmd == "QUIT" { break; }
+        if matches!(cmd.as_str(), "READY" | "UNREADY" | "START") {
+            socket.write_all(format!("{cmd}\n").as_bytes())?;
         } else {
-            eprintln!("Expected MOVE <x> <z>, finite coordinates");
+            println!("Use ready, unready{} or quit.", if host { ", start" } else { "" });
         }
     }
     Ok(())
@@ -154,10 +168,11 @@ fn run_join(addr: &str) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.as_slice() {
-        [_, mode, addr] if mode == "host" => run_host(addr),
-        [_, mode, addr] if mode == "join" => run_join(addr),
+        [_, action, address] if action == "host" => host(address),
+        [_, action, address] if action == "join" => join(address),
         _ => {
-            eprintln!("Usage: survivors-coop host 0.0.0.0:45454 | join HOST_IP:45454");
+            println!("Host: survivors-coop host 0.0.0.0:{PORT}");
+            println!("Then on host and guests: survivors-coop join HOST_IP:{PORT}");
             Ok(())
         }
     }
@@ -167,17 +182,10 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn move_input_is_validated() {
-        assert!(parse_move("MOVE 1.2 -5").is_some());
-        for bad in ["MOVE NaN 0", "MOVE 1 inf", "MOVE 1", "MOVE 1 2 3", "MOVE 100001 0"] {
-            assert!(parse_move(bad).is_none(), "{bad}");
-        }
-    }
-    #[test]
-    fn snapshots_are_stably_ordered() {
-        let mut p = BTreeMap::new();
-        p.insert(2, Position { x: 3.0, z: 4.0 });
-        p.insert(1, Position { x: 1.0, z: 2.0 });
-        assert_eq!(snapshot(&p), "STATE 1:1.000:2.000 2:3.000:4.000\n");
+    fn lobby_status() {
+        let mut lobby = Lobby::default();
+        lobby.players.insert(1, Player { ready: false });
+        lobby.players.insert(2, Player { ready: true });
+        assert_eq!(lobby_snapshot(&lobby), "LOBBY 1:WAITING 2:READY\n");
     }
 }
