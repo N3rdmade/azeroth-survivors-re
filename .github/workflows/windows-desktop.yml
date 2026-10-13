@@ -1,0 +1,47 @@
+name: Windows Desktop Game
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: multiplayer
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: native-survivors-windows
+      - name: Build native Windows game
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build --release -p warcraft-survivors --no-default-features
+      - name: Package game EXE and instructions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows-game | Out-Null
+          Copy-Item target/release/warcraft-survivors.exe windows-game/
+          @'
+          AZEROTH SURVIVORS — RUST WINDOWS DESKTOP BUILD
+
+          This is the actual native single-player game, NOT the LAN lobby test.
+
+          The game requires WoW 1.12.1 client data, not included with this ZIP.
+          Put the complete compatible WoW 1.12.1 Data folder at:
+            windows-game/Data/
+
+          Then run warcraft-survivors.exe.
+
+          If assets cannot be found, configure WOW_DATA to point to your
+          existing WoW 1.12.1 Data directory before launching.
+
+          Multiplayer gameplay has NOT yet been integrated.
+          '@ | Set-Content -Path windows-game/README.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AzerothSurvivors-Rust-Windows-Desktop
+          path: windows-game/
+          retention-days: 30
