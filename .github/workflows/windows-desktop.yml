@@ -24,6 +24,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path windows-game | Out-Null
           Copy-Item target/release/warcraft-survivors.exe windows-game/
+          Copy-Item windows/Launch-Azeroth-Survivors.bat windows-game/
           @'
           AZEROTH SURVIVORS — RUST WINDOWS DESKTOP BUILD
 
@@ -33,7 +34,8 @@ jobs:
           Put the complete compatible WoW 1.12.1 Data folder at:
             windows-game/Data/
 
-          Then run warcraft-survivors.exe.
+          Then double-click Launch-Azeroth-Survivors.bat to check the data and launch.
+          The launcher captures errors in startup-log.txt.
 
           If assets cannot be found, configure WOW_DATA to point to your
           existing WoW 1.12.1 Data directory before launching.
