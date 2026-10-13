@@ -77,6 +77,8 @@ fn run_host(addr: &str) -> io::Result<()> {
                     let vacant = (1..=MAX_PLAYERS as u8)
                         .find(|id| !lobby.players.contains_key(id));
                     if let Some(id) = vacant {
+                        // Send the handshake before exposing the connection to the snapshot loop.
+                        socket.write_all(format!("WELCOME {id}\n").as_bytes())?;
                         lobby.players.insert(id, Position { x: 0.0, z: 0.0 });
                         lobby.peers.insert(id, socket.try_clone()?);
                     }
